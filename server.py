@@ -3,19 +3,28 @@ import socket, threading, os, logging
 from config import *
 from utils import load_data, save_data
 
+# Configure logging for server events
 logging.basicConfig(level=logging.INFO)
+
+# Load user credentials and contact lists from persistent storage
 users = load_data("users.pkl")
 contacts = load_data("contacts.pkl")
 
-clients = {}  # {username: conn}
+# Dictionary to hold currently connected clients {username: socket connection}
+clients = {}
+
+# Lock for synchronizing access to shared resources
 lock = threading.Lock()
 
+# Function to handle communication with a connected client
 def handle_client(conn, addr):
     username = None
     try:
+        # First message from client must be authentication data
         auth_data = conn.recv(BUFFER_SIZE).decode(ENCODING)
         action, username, password = auth_data.split(SEPARATOR)
 
+        # Register or authenticate user
         with lock:
             if action == "REGISTER":
                 if username in users:
@@ -40,14 +49,17 @@ def handle_client(conn, addr):
                 conn.close()
                 return
 
+        # Store the connection for active communication
         clients[username] = conn
         logging.info(f"{username} connected from {addr}")
 
+        # Listen for client messages in a loop
         while True:
             msg = conn.recv(BUFFER_SIZE).decode(ENCODING)
             if not msg or msg.strip().lower() == "exit":
                 break
 
+            # Direct message to another user
             if msg.startswith("SENDTO"):
                 _, to_user, content = msg.split(SEPARATOR, 2)
                 if to_user in clients:
@@ -55,11 +67,14 @@ def handle_client(conn, addr):
                 else:
                     conn.send(f"{to_user} is offline.".encode(ENCODING))
 
+            # Receive file and forward to another user
             elif msg.startswith("FILE"):
                 _, to_user, filename, filesize = msg.split(SEPARATOR)
                 filesize = int(filesize)
                 received_data = b""
                 remaining = filesize
+
+                # Receive file data in chunks
                 while remaining > 0:
                     chunk = conn.recv(min(BUFFER_SIZE, remaining))
                     if not chunk:
@@ -67,12 +82,14 @@ def handle_client(conn, addr):
                     received_data += chunk
                     remaining -= len(chunk)
 
+                # Forward the file to the recipient if they are online
                 if to_user in clients:
                     clients[to_user].send(f"FILE{SEPARATOR}{filename}{SEPARATOR}{filesize}".encode(ENCODING))
                     clients[to_user].sendall(received_data)
                 else:
                     conn.send(f"{to_user} is offline. File not delivered.".encode(ENCODING))
 
+            # Add a contact to the user's contact list
             elif msg.startswith("ADD_CONTACT"):
                 _, new_contact = msg.split(SEPARATOR)
                 with lock:
@@ -86,6 +103,7 @@ def handle_client(conn, addr):
                     else:
                         conn.send(f"User {new_contact} does not exist.".encode(ENCODING))
 
+            # Remove a contact from the user's contact list
             elif msg.startswith("REMOVE_CONTACT"):
                 _, contact = msg.split(SEPARATOR)
                 with lock:
@@ -96,6 +114,7 @@ def handle_client(conn, addr):
                     else:
                         conn.send(f"{contact} is not in your contacts.".encode(ENCODING))
 
+            # List all contacts for the user
             elif msg.startswith("LIST_CONTACTS"):
                 with lock:
                     user_contacts = contacts.get(username, [])
@@ -104,8 +123,11 @@ def handle_client(conn, addr):
                     else:
                         conn.send("You have no contacts.".encode(ENCODING))
 
+    # Handle unexpected exceptions gracefully
     except Exception as e:
         logging.error(f"Error with {username or addr}: {e}")
+    
+    # Clean up client connection on disconnect or error
     finally:
         with lock:
             if username in clients:
@@ -113,6 +135,7 @@ def handle_client(conn, addr):
         conn.close()
         logging.info(f"{username} disconnected.")
 
+# Function to start the server and accept incoming client connections
 def start_server():
     server_socket = socket.socket()
     server_socket.bind((SERVER_HOST, SERVER_PORT))
@@ -120,11 +143,16 @@ def start_server():
     logging.info(f"Server listening on {SERVER_HOST}:{SERVER_PORT}")
 
     try:
+        # Continuously accept new client connections
         while True:
             conn, addr = server_socket.accept()
             threading.Thread(target=handle_client, args=(conn, addr), daemon=True).start()
+
+    # Graceful shutdown on keyboard interrupt
     except KeyboardInterrupt:
         logging.info("Shutting down server...")
+
+    # Close all connections and clean up on shutdown
     finally:
         server_socket.close()
         with lock:
@@ -136,5 +164,6 @@ def start_server():
                     pass
         logging.info("Server closed.")
 
+# Entry point for server script
 if __name__ == "__main__":
     start_server()
